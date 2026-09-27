@@ -1,0 +1,36 @@
+{
+  "url": "http://127.0.0.1:8080/",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "Loading http://127.0.0.1:8080/",
+      "hasCanvas": false,
+      "bodyTextLen": 2326,
+      "bodyTextHash": "a1e3ee45ec65e21b1c97fd66bda0d54089d676bc6c945da31a9fb8c4a2ea14b6",
+      "bodyTextPrefix": "MurmurShare Speak freely. Stay unnamed. Leave what you cannot sa",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "Murmur",
+      "hasCanvas": false,
+      "bodyTextLen": 2531,
+      "bodyTextHash": "7084308cd0502bc4e04ebbc64b0e98efcbbe264a4a9254d3b09ee749c0a33668",
+      "bodyTextPrefix": "Murmur Share SPEAK FREELY. STAY UNNAMED. Leave what you cannot s",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/app-builder-preview.json"
+}
