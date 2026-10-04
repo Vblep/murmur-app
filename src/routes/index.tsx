@@ -45,16 +45,24 @@ export const Route = createFileRoute("/")({
     sort: search.sort,
   }),
   loader: async ({ deps }) => {
-    const [murmurs, stats] = await Promise.all([
-      listMurmurs({
-        data: {
-          topic: deps.topic,
-          sort: deps.sort,
-        },
-      }),
-      getRoomStats(),
-    ]);
-    return { murmurs, stats };
+    try {
+      const [murmurs, stats] = await Promise.all([
+        listMurmurs({
+          data: {
+            topic: deps.topic,
+            sort: deps.sort,
+          },
+        }),
+        getRoomStats(),
+      ]);
+      return { murmurs, stats };
+    } catch (error) {
+      console.error("[murmur] feed load failed", error);
+      return {
+        murmurs: [] as MurmurSummary[],
+        stats: { murmurs: 0, replies: 0 },
+      };
+    }
   },
   component: Home,
 });
