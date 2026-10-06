@@ -6,7 +6,15 @@ export type DbSource = "neon" | "pglite";
 // An empty/whitespace DATABASE_URL (an easy misconfig in deploy UIs) must mean
 // "unset" — otherwise production would silently run on the PGLite fallback.
 const rawDatabaseUrl =
-  typeof process !== "undefined" ? process.env.DATABASE_URL : undefined;
+  typeof process !== "undefined"
+    ? [
+        process.env.DATABASE_URL,
+        process.env.POSTGRES_URL,
+        process.env.DATABASE_URL_UNPOOLED,
+        process.env.POSTGRES_PRISMA_URL,
+        process.env.POSTGRES_URL_NON_POOLING,
+      ].find((value) => value && value.trim())
+    : undefined;
 const databaseUrl =
   rawDatabaseUrl && rawDatabaseUrl.trim() ? rawDatabaseUrl : undefined;
 
@@ -85,67 +93,95 @@ function toSql(run: Run): Sql {
   return sql;
 }
 
+function splitSqlStatements(sqlText: string): string[] {
+  const statements: string[] = [];
+  let current = "";
+  let i = 0;
+  while (i < sqlText.length) {
+    const rest = sqlText.slice(i);
+    const dollar = rest.match(/^\$[A-Za-z0-9_]*\$/);
+    if (dollar) {
+      const tag = dollar[0];
+      const end = sqlText.indexOf(tag, i + tag.length);
+      if (end === -1) {
+        current += rest;
+        break;
+      }
+      current += sqlText.slice(i, end + tag.length);
+      i = end + tag.length;
+      continue;
+    }
+    const ch = sqlText[i];
+    if (ch === "'") {
+      current += ch;
+      i += 1;
+      while (i < sqlText.length) {
+        current += sqlText[i];
+        if (sqlText[i] === "'" && sqlText[i + 1] === "'") {
+          current += sqlText[i + 1];
+          i += 2;
+          continue;
+        }
+        if (sqlText[i] === "'") {
+          i += 1;
+          break;
+        }
+        i += 1;
+      }
+      continue;
+    }
+    if (ch === ";") {
+      const trimmed = current.trim();
+      if (trimmed.length > 0) statements.push(trimmed);
+      current = "";
+      i += 1;
+      continue;
+    }
+    current += ch;
+    i += 1;
+  }
+  const trimmed = current.trim();
+  if (trimmed.length > 0) statements.push(trimmed);
+  return statements;
+}
+
 function createNeonSql(): Promise<Sql> {
   globalRef.__pgSqlPromise__ ??= (async () => {
-    // Regular Postgres driver: node-postgres (`pg`) — works directly with Neon's
-    // pooled endpoint. One pool per process; warm serverless instances reuse it.
-    const { Pool, types } = await import("pg");
-    types.setTypeParser(OID_INT8, Number);
-    types.setTypeParser(OID_DATE, identity);
-    types.setTypeParser(OID_INTERVAL, identity);
-    const pool = new Pool({
-      connectionString: databaseUrl,
-      ssl:
-        databaseUrl && /sslmode=disable/i.test(databaseUrl)
-          ? false
-          : { rejectUnauthorized: false },
-    });
+    // HTTP queries: Vercel serverless cannot open a TCP/WebSocket to Neon.
+    // `@neondatabase/serverless` `neon()` uses fetch and works on Vercel.
+    const { neon } = await import("@neondatabase/serverless");
+    if (!databaseUrl) {
+      throw new Error("DATABASE_URL is not set");
+    }
+    const query = neon(databaseUrl);
 
-    // Apply migrations at runtime too. Build-time `db:migrate` is skipped when
-    // DATABASE_URL is missing (or a redeploy reuses an old artifact), which
-    // otherwise 500s the production homepage on first query.
-    const client = await pool.connect();
-    try {
-      await client.query(
-        "create table if not exists _migrations (name text primary key, applied_at timestamptz not null default now())",
-      );
-      const doneRows = await client.query<{ name: string }>(
-        "select name from _migrations",
-      );
-      const done = doneRows.rows.map((r) => r.name);
-      const migrations = import.meta.glob("/migrations/*.sql", {
-        query: "?raw",
-        import: "default",
-        eager: true,
-      }) as Record<string, string>;
-      for (const { name, path } of pendingMigrations(
-        Object.keys(migrations),
-        done,
-      )) {
-        try {
-          await client.query("BEGIN");
-          await client.query(migrations[path]);
-          await client.query("INSERT INTO _migrations (name) VALUES ($1)", [
-            name,
-          ]);
-          await client.query("COMMIT");
-        } catch (err) {
-          try {
-            await client.query("ROLLBACK");
-          } catch {
-            // ROLLBACK fails when the connection died — keep the original error.
-          }
-          throw err;
-        }
+    const run: Run = async <T>(text: string, params: unknown[]) => {
+      const rows = await query.query(text, params as any[]);
+      return rows as T[];
+    };
+
+    await run(
+      "create table if not exists _migrations (name text primary key, applied_at timestamptz not null default now())",
+      [],
+    );
+    const doneRows = await run<{ name: string }>("select name from _migrations", []);
+    const done = doneRows.map((r) => r.name);
+    const migrations = import.meta.glob("../../migrations/*.sql", {
+      query: "?raw",
+      import: "default",
+      eager: true,
+    }) as Record<string, string>;
+    for (const { name, path } of pendingMigrations(
+      Object.keys(migrations),
+      done,
+    )) {
+      for (const statement of splitSqlStatements(migrations[path] ?? "")) {
+        await run(statement, []);
       }
-    } finally {
-      client.release();
+      await run("insert into _migrations (name) values ($1)", [name]);
     }
 
-    return toSql(async <T>(text: string, params: unknown[]) => {
-      const res = await pool.query(text, params);
-      return res.rows as T[];
-    });
+    return toSql(run);
   })().catch((err) => {
     globalRef.__pgSqlPromise__ = undefined;
     throw err;
@@ -185,7 +221,7 @@ async function createPgliteSql(): Promise<Sql> {
   // passes serialized on a global chain so concurrent callers never
   // double-apply.
   const migrate = async (): Promise<void> => {
-    const migrations = import.meta.glob("/migrations/*.sql", {
+    const migrations = import.meta.glob("../../migrations/*.sql", {
       query: "?raw",
       import: "default",
       eager: true,
@@ -222,6 +258,11 @@ async function createSql(): Promise<Sql> {
     throw new Error(
       "@/lib/db is server-only — call getSql() from a createServerFn handler " +
         "or a server route loader, never from client code.",
+    );
+  }
+  if (process.env.VERCEL && !databaseUrl) {
+    throw new Error(
+      "DATABASE_URL is not available on this Vercel deployment. Connect Neon in Storage and redeploy.",
     );
   }
   return dbSource === "neon" ? createNeonSql() : createPgliteSql();
@@ -277,7 +318,7 @@ export function ensureDbReady(): Promise<void> {
 const globalBoot = globalThis as typeof globalThis & {
   __pgBootstrapPromise__?: Promise<void>;
 };
-if (typeof window === "undefined" && dbSource === "pglite") {
+if (typeof window === "undefined" && dbSource === "pglite" && !process.env.VERCEL) {
   globalBoot.__pgBootstrapPromise__ ??= ensureDbReady().catch((err) => {
     globalBoot.__pgBootstrapPromise__ = undefined;
     console.error("[db] PGLite bootstrap failed:", err);
